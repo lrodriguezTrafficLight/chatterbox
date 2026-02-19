@@ -1,5 +1,6 @@
 """Generador de audio TTS en español usando ChatterboxMultilingualTTS."""
 
+import argparse
 import re
 import torch
 import torchaudio as ta
@@ -8,7 +9,7 @@ from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 OUTPUT_DIR = Path("output")
-MAX_CHARS = 300  # Limite seguro por fragmento para no exceder max_text_tokens
+MAX_CHARS = 300
 
 
 def load_model():
@@ -30,7 +31,6 @@ def split_text(text, max_chars=MAX_CHARS):
         else:
             if current:
                 chunks.append(current)
-            # Si una oracion sola excede el limite, dividir por comas
             if len(sentence) > max_chars:
                 parts = sentence.split(", ")
                 sub = ""
@@ -53,16 +53,48 @@ def split_text(text, max_chars=MAX_CHARS):
     return chunks
 
 
-def generate(model, text, filename):
+def generate_from_paragraphs(model, paragraphs, filename, pause=0.8):
+    """Genera audio a partir de una lista de parrafos, con pausa entre ellos."""
+    wavs = []
+    silence = torch.zeros(1, int(model.sr * pause))
+    total = len(paragraphs)
+
+    for i, para in enumerate(paragraphs, 1):
+        chunks = split_text(para)
+        if len(chunks) == 1:
+            print(f"  [{i}/{total}] \"{para[:70]}...\"")
+            wav = model.generate(para, language_id="es")
+            wavs.append(wav)
+        else:
+            print(f"  [{i}/{total}] Parrafo largo ({len(chunks)} partes): \"{para[:50]}...\"")
+            short_silence = torch.zeros(1, int(model.sr * 0.3))
+            for j, chunk in enumerate(chunks, 1):
+                print(f"    [{j}/{len(chunks)}] \"{chunk[:60]}...\"")
+                wav = model.generate(chunk, language_id="es")
+                wavs.append(wav)
+                if j < len(chunks):
+                    wavs.append(short_silence)
+
+        if i < total:
+            wavs.append(silence)
+
+    final_wav = torch.cat(wavs, dim=1)
+    output_path = OUTPUT_DIR / filename
+    ta.save(str(output_path), final_wav, model.sr)
+    duration = final_wav.shape[1] / model.sr
+    print(f"\nGuardado en {output_path} ({duration:.1f}s, {total} parrafos)")
+
+
+def generate_single(model, text, filename):
+    """Genera audio a partir de un texto, dividiendolo si es necesario."""
     chunks = split_text(text)
 
     if len(chunks) == 1:
         print(f"Generando: \"{text[:80]}{'...' if len(text) > 80 else ''}\"")
         wav = model.generate(text, language_id="es")
     else:
-        print(f"Texto largo detectado ({len(text)} chars). Dividiendo en {len(chunks)} fragmentos...")
+        print(f"Texto largo ({len(text)} chars, {len(chunks)} fragmentos)...")
         wavs = []
-        # Silencio de 0.4s entre fragmentos
         silence = torch.zeros(1, int(model.sr * 0.4))
         for i, chunk in enumerate(chunks, 1):
             print(f"  [{i}/{len(chunks)}] \"{chunk[:60]}...\"")
@@ -79,28 +111,46 @@ def generate(model, text, filename):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="TTS en español con Chatterbox")
+    parser.add_argument("-f", "--file", type=str,
+                        help="Archivo de texto con parrafos separados por lineas en blanco")
+    parser.add_argument("-o", "--output", type=str, default=None,
+                        help="Nombre del archivo de salida (default: audio_001.wav)")
+    parser.add_argument("-p", "--pause", type=float, default=0.8,
+                        help="Pausa en segundos entre parrafos (default: 0.8)")
+    args = parser.parse_args()
+
     OUTPUT_DIR.mkdir(exist_ok=True)
     model = load_model()
-    count = 1
 
-    print("\n--- TTS Español ---")
-    print("Escribe el texto y presiona Enter para generar audio.")
-    print("Soporta textos largos (se dividen automaticamente).")
-    print("Escribe 'salir' para terminar.\n")
+    if args.file:
+        # Modo archivo: leer parrafos separados por lineas en blanco
+        text = Path(args.file).read_text(encoding="utf-8")
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+        filename = args.output or "speech.wav"
+        print(f"\n--- Generando desde {args.file} ({len(paragraphs)} parrafos) ---\n")
+        generate_from_paragraphs(model, paragraphs, filename, pause=args.pause)
+    else:
+        # Modo interactivo
+        count = 1
+        print("\n--- TTS Español ---")
+        print("Escribe el texto y presiona Enter para generar audio.")
+        print("Soporta textos largos (se dividen automaticamente).")
+        print("Escribe 'salir' para terminar.\n")
 
-    while True:
-        try:
-            text = input("Texto: ").strip()
-        except (KeyboardInterrupt, EOFError):
-            break
+        while True:
+            try:
+                text = input("Texto: ").strip()
+            except (KeyboardInterrupt, EOFError):
+                break
 
-        if not text or text.lower() == "salir":
-            break
+            if not text or text.lower() == "salir":
+                break
 
-        filename = f"audio_{count:03d}.wav"
-        generate(model, text, filename)
-        count += 1
-        print()
+            filename = args.output or f"audio_{count:03d}.wav"
+            generate_single(model, text, filename)
+            count += 1
+            print()
 
     print("Fin.")
 
