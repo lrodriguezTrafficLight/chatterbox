@@ -159,26 +159,43 @@ class ChatterboxMultilingualTTS:
 
     @classmethod
     def from_local(cls, ckpt_dir, device) -> 'ChatterboxMultilingualTTS':
+        import gc
         ckpt_dir = Path(ckpt_dir)
+
+        # Use float16 on CUDA to fit in low-VRAM GPUs (e.g. 4GB)
+        use_half = device not in ["cpu", "mps"]
 
         ve = VoiceEncoder()
         ve.load_state_dict(
             torch.load(ckpt_dir / "ve.pt", weights_only=True)
         )
         ve.to(device).eval()
+        if use_half:
+            ve.half()
 
         t3 = T3(T3Config.multilingual())
         t3_state = load_safetensors(ckpt_dir / "t3_mtl23ls_v2.safetensors")
         if "model" in t3_state.keys():
             t3_state = t3_state["model"][0]
         t3.load_state_dict(t3_state)
+        del t3_state
+        gc.collect()
         t3.to(device).eval()
+        if use_half:
+            t3.half()
+        gc.collect()
+        if use_half:
+            torch.cuda.empty_cache()
 
+        # S3Gen stays in float32 — HiFi-GAN vocoder is not float16-compatible
         s3gen = S3Gen()
         s3gen.load_state_dict(
             torch.load(ckpt_dir / "s3gen.pt", weights_only=True)
         )
         s3gen.to(device).eval()
+        gc.collect()
+        if use_half:
+            torch.cuda.empty_cache()
 
         tokenizer = MTLTokenizer(
             str(ckpt_dir / "grapheme_mtl_merged_expanded_v1.json")
@@ -187,6 +204,9 @@ class ChatterboxMultilingualTTS:
         conds = None
         if (builtin_voice := ckpt_dir / "conds.pt").exists():
             conds = Conditionals.load(builtin_voice).to(device)
+            if use_half:
+                # Only T3 conds need half — S3Gen conds stay float32
+                conds.t3 = conds.t3.to(device=device, dtype=torch.float16)
 
         return cls(t3, s3gen, ve, tokenizer, device, conds=conds)
 
