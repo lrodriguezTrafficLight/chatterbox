@@ -128,3 +128,7 @@ speech/
 
 # Claude Code
 CLAUDE.md
+
+# Output directory
+output/
+
