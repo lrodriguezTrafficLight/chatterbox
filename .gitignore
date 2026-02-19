@@ -118,6 +118,9 @@ checkpoints/
 # Generated audio samples
 **/*.wav
 
+# Speech text files (personal content)
+speech/
+
 # HuggingFace Hub cache (downloaded model weights)
 *.bin
 *.safetensors
