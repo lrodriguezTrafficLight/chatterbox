@@ -131,6 +131,7 @@ class ChatterboxTurboTTS:
 
     @classmethod
     def from_local(cls, ckpt_dir, device) -> 'ChatterboxTurboTTS':
+        import gc
         ckpt_dir = Path(ckpt_dir)
 
         # Always load to CPU first for non-CUDA devices to handle CUDA-saved models
@@ -139,11 +140,16 @@ class ChatterboxTurboTTS:
         else:
             map_location = None
 
+        # Use float16 on CUDA to fit in low-VRAM GPUs (e.g. 4GB)
+        use_half = device not in ["cpu", "mps"]
+
         ve = VoiceEncoder()
         ve.load_state_dict(
             load_file(ckpt_dir / "ve.safetensors")
         )
         ve.to(device).eval()
+        if use_half:
+            ve.half()
 
         # Turbo specific hp
         hp = T3Config(text_tokens_dict_size=50276)
@@ -159,15 +165,28 @@ class ChatterboxTurboTTS:
         if "model" in t3_state.keys():
             t3_state = t3_state["model"][0]
         t3.load_state_dict(t3_state)
+        del t3_state
         del t3.tfmr.wte
+        gc.collect()
         t3.to(device).eval()
+        if use_half:
+            t3.half()
+        gc.collect()
+        if use_half:
+            torch.cuda.empty_cache()
 
         s3gen = S3Gen(meanflow=True)
         weights = load_file(ckpt_dir / "s3gen_meanflow.safetensors")
         s3gen.load_state_dict(
             weights, strict=True
         )
+        del weights
+        gc.collect()
+        # S3Gen stays in float32 — HiFi-GAN vocoder is not float16-compatible
         s3gen.to(device).eval()
+        gc.collect()
+        if use_half:
+            torch.cuda.empty_cache()
 
         tokenizer = AutoTokenizer.from_pretrained(ckpt_dir)
         if tokenizer.pad_token is None:
@@ -179,6 +198,9 @@ class ChatterboxTurboTTS:
         builtin_voice = ckpt_dir / "conds.pt"
         if builtin_voice.exists():
             conds = Conditionals.load(builtin_voice, map_location=map_location).to(device)
+            if use_half:
+                # Only T3 conds need half — S3Gen conds stay float32
+                conds.t3 = conds.t3.to(device=device, dtype=torch.float16)
 
         return cls(t3, s3gen, ve, tokenizer, device, conds=conds)
 
