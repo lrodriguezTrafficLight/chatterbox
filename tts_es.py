@@ -53,28 +53,34 @@ def split_text(text, max_chars=MAX_CHARS):
     return chunks
 
 
+def generate_paragraph_wav(model, para, index, total):
+    """Genera el waveform de un parrafo individual (puede tener multiples chunks)."""
+    chunks = split_text(para)
+    if len(chunks) == 1:
+        print(f"  [{index}/{total}] \"{para[:70]}...\"")
+        return model.generate(para, language_id="es")
+    else:
+        print(f"  [{index}/{total}] Parrafo largo ({len(chunks)} partes): \"{para[:50]}...\"")
+        wavs = []
+        short_silence = torch.zeros(1, int(model.sr * 0.3))
+        for j, chunk in enumerate(chunks, 1):
+            print(f"    [{j}/{len(chunks)}] \"{chunk[:60]}...\"")
+            wav = model.generate(chunk, language_id="es")
+            wavs.append(wav)
+            if j < len(chunks):
+                wavs.append(short_silence)
+        return torch.cat(wavs, dim=1)
+
+
 def generate_from_paragraphs(model, paragraphs, filename, pause=0.8):
-    """Genera audio a partir de una lista de parrafos, con pausa entre ellos."""
+    """Genera un unico archivo de audio con todos los parrafos."""
     wavs = []
     silence = torch.zeros(1, int(model.sr * pause))
     total = len(paragraphs)
 
     for i, para in enumerate(paragraphs, 1):
-        chunks = split_text(para)
-        if len(chunks) == 1:
-            print(f"  [{i}/{total}] \"{para[:70]}...\"")
-            wav = model.generate(para, language_id="es")
-            wavs.append(wav)
-        else:
-            print(f"  [{i}/{total}] Parrafo largo ({len(chunks)} partes): \"{para[:50]}...\"")
-            short_silence = torch.zeros(1, int(model.sr * 0.3))
-            for j, chunk in enumerate(chunks, 1):
-                print(f"    [{j}/{len(chunks)}] \"{chunk[:60]}...\"")
-                wav = model.generate(chunk, language_id="es")
-                wavs.append(wav)
-                if j < len(chunks):
-                    wavs.append(short_silence)
-
+        wav = generate_paragraph_wav(model, para, i, total)
+        wavs.append(wav)
         if i < total:
             wavs.append(silence)
 
@@ -83,6 +89,22 @@ def generate_from_paragraphs(model, paragraphs, filename, pause=0.8):
     ta.save(str(output_path), final_wav, model.sr)
     duration = final_wav.shape[1] / model.sr
     print(f"\nGuardado en {output_path} ({duration:.1f}s, {total} parrafos)")
+
+
+def generate_individual_files(model, paragraphs, base_name, pause=0.8):
+    """Genera un archivo de audio individual por cada parrafo."""
+    total = len(paragraphs)
+    stem = Path(base_name).stem
+
+    for i, para in enumerate(paragraphs, 1):
+        wav = generate_paragraph_wav(model, para, i, total)
+        filename = f"{stem}_{i:03d}.wav"
+        output_path = OUTPUT_DIR / filename
+        ta.save(str(output_path), wav, model.sr)
+        duration = wav.shape[1] / model.sr
+        print(f"    -> {output_path} ({duration:.1f}s)")
+
+    print(f"\n{total} archivos generados en {OUTPUT_DIR}/")
 
 
 def generate_single(model, text, filename):
@@ -128,8 +150,17 @@ def main():
         text = Path(args.file).read_text(encoding="utf-8")
         paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
         filename = args.output or "speech.wav"
-        print(f"\n--- Generando desde {args.file} ({len(paragraphs)} parrafos) ---\n")
-        generate_from_paragraphs(model, paragraphs, filename, pause=args.pause)
+        print(f"\n--- Archivo: {args.file} ({len(paragraphs)} parrafos) ---")
+        print("  [1] Archivo unico (todos los parrafos en un solo .wav)")
+        print(f"  [2] Archivos individuales (un .wav por parrafo)\n")
+
+        choice = input("Selecciona modo (1/2): ").strip()
+        print()
+
+        if choice == "2":
+            generate_individual_files(model, paragraphs, filename, pause=args.pause)
+        else:
+            generate_from_paragraphs(model, paragraphs, filename, pause=args.pause)
     else:
         # Modo interactivo
         count = 1
